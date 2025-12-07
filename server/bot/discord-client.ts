@@ -19,6 +19,7 @@ import { getUncachableSpotifyClient } from './spotify-client';
 const queues = new Map<string, Queue>();
 const players = new Map<string, AudioPlayer>();
 const connections = new Map<string, VoiceConnection>();
+const textChannels = new Map<string, TextChannel>();
 
 let discordClient: Client | null = null;
 let botStartTime: number = Date.now();
@@ -156,9 +157,48 @@ async function getSpotifyTrack(url: string): Promise<Song | null> {
   }
 }
 
+// Create or get audio player with listeners attached once
+function getOrCreatePlayer(guildId: string): AudioPlayer {
+  let player = players.get(guildId);
+  if (player) return player;
+
+  player = createAudioPlayer();
+  players.set(guildId, player);
+
+  // Attach listeners only once when player is created
+  player.on(AudioPlayerStatus.Idle, () => {
+    const queue = getQueue(guildId);
+    const textChannel = textChannels.get(guildId);
+    
+    if (!queue.isPlaying) return;
+
+    // Handle loop modes
+    if (queue.loop === 'song') {
+      if (textChannel) playSong(guildId, textChannel);
+    } else {
+      queue.currentIndex++;
+      if (queue.loop === 'queue' && queue.currentIndex >= queue.songs.length) {
+        queue.currentIndex = 0;
+      }
+      if (textChannel) playSong(guildId, textChannel);
+    }
+  });
+
+  player.on('error', (error) => {
+    console.error('Player error:', error);
+    const queue = getQueue(guildId);
+    const textChannel = textChannels.get(guildId);
+    queue.currentIndex++;
+    if (textChannel) playSong(guildId, textChannel);
+  });
+
+  return player;
+}
+
 // Play the current song
 async function playSong(guildId: string, textChannel: TextChannel): Promise<void> {
   const queue = getQueue(guildId);
+  textChannels.set(guildId, textChannel);
   
   if (queue.songs.length === 0 || queue.currentIndex >= queue.songs.length) {
     queue.isPlaying = false;
@@ -167,6 +207,8 @@ async function playSong(guildId: string, textChannel: TextChannel): Promise<void
       connection.destroy();
       connections.delete(guildId);
     }
+    players.delete(guildId);
+    textChannels.delete(guildId);
     return;
   }
 
@@ -176,17 +218,19 @@ async function playSong(guildId: string, textChannel: TextChannel): Promise<void
     const stream = await play.stream(song.url);
     const resource = createAudioResource(stream.stream, {
       inputType: stream.type,
+      inlineVolume: true,
     });
+    
+    // Apply volume (0-100 -> 0-1)
+    if (resource.volume) {
+      resource.volume.setVolume(queue.volume / 100);
+    }
 
-    let player = players.get(guildId);
-    if (!player) {
-      player = createAudioPlayer();
-      players.set(guildId, player);
-      
-      const connection = connections.get(guildId);
-      if (connection) {
-        connection.subscribe(player);
-      }
+    const player = getOrCreatePlayer(guildId);
+    
+    const connection = connections.get(guildId);
+    if (connection) {
+      connection.subscribe(player);
     }
 
     player.play(resource);
@@ -209,25 +253,6 @@ async function playSong(guildId: string, textChannel: TextChannel): Promise<void
     }
 
     textChannel.send({ embeds: [embed] });
-
-    player.on(AudioPlayerStatus.Idle, () => {
-      // Handle loop modes
-      if (queue.loop === 'song') {
-        playSong(guildId, textChannel);
-      } else {
-        queue.currentIndex++;
-        if (queue.loop === 'queue' && queue.currentIndex >= queue.songs.length) {
-          queue.currentIndex = 0;
-        }
-        playSong(guildId, textChannel);
-      }
-    });
-
-    player.on('error', (error) => {
-      console.error('Player error:', error);
-      queue.currentIndex++;
-      playSong(guildId, textChannel);
-    });
 
   } catch (error) {
     console.error('Play error:', error);
@@ -294,6 +319,7 @@ async function handlePlay(message: Message, args: string[]): Promise<void> {
       connections.delete(message.guildId!);
       players.delete(message.guildId!);
       queues.delete(message.guildId!);
+      textChannels.delete(message.guildId!);
     });
   }
 
@@ -344,6 +370,10 @@ async function handleResume(message: Message): Promise<void> {
 async function handleStop(message: Message): Promise<void> {
   const player = players.get(message.guildId!);
   const connection = connections.get(message.guildId!);
+  const queue = getQueue(message.guildId!);
+  
+  // Mark as not playing before stopping to prevent idle handler from triggering
+  queue.isPlaying = false;
   
   if (player) {
     player.stop();
@@ -355,6 +385,7 @@ async function handleStop(message: Message): Promise<void> {
   
   queues.delete(message.guildId!);
   players.delete(message.guildId!);
+  textChannels.delete(message.guildId!);
   
   message.reply('Reprodução parada e fila limpa!');
 }
@@ -364,7 +395,7 @@ async function handleSkip(message: Message): Promise<void> {
   const queue = getQueue(message.guildId!);
   
   if (player && queue.isPlaying) {
-    queue.currentIndex++;
+    // Just stop the player - the idle handler will advance the queue
     player.stop();
     message.reply('Música pulada!');
   } else {
@@ -382,7 +413,7 @@ async function handleQueue(message: Message): Promise<void> {
 
   const songList = queue.songs
     .map((song, index) => {
-      const prefix = index === queue.currentIndex ? '▶️' : `${index + 1}.`;
+      const prefix = index === queue.currentIndex ? '>' : `${index + 1}.`;
       return `${prefix} **${song.title}** - ${song.artist} (${formatDuration(song.duration)})`;
     })
     .slice(0, 10)
@@ -458,6 +489,12 @@ async function handleSearch(message: Message, args: string[]): Promise<void> {
 
 async function handleVolume(message: Message, args: string[]): Promise<void> {
   const queue = getQueue(message.guildId!);
+  
+  if (args.length === 0) {
+    message.reply(`Volume atual: ${queue.volume}%`);
+    return;
+  }
+  
   const volume = parseInt(args[0]);
   
   if (isNaN(volume) || volume < 0 || volume > 100) {
@@ -466,6 +503,16 @@ async function handleVolume(message: Message, args: string[]): Promise<void> {
   }
 
   queue.volume = volume;
+  
+  // Apply volume to currently playing track if available
+  const player = players.get(message.guildId!);
+  if (player && player.state.status === AudioPlayerStatus.Playing) {
+    const resource = player.state.resource;
+    if (resource && resource.volume) {
+      resource.volume.setVolume(volume / 100);
+    }
+  }
+  
   message.reply(`Volume ajustado para ${volume}%`);
 }
 
