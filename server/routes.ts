@@ -1,16 +1,24 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { initDiscordBot, getBotStatus } from "./bot/discord-client";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // put application routes here
-  // prefix all routes with /api
+  // Initialize Discord bot
+  initDiscordBot().catch(console.error);
 
-  // use storage to perform CRUD operations on the storage interface
-  // e.g. storage.insertUser(user) or storage.getUserByUsername(username)
+  // Bot status API
+  app.get("/api/bot/status", (req, res) => {
+    try {
+      const status = getBotStatus();
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get bot status" });
+    }
+  });
 
   return httpServer;
 }
