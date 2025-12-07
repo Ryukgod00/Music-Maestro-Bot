@@ -1,4 +1,4 @@
-// Discord Integration - Using Replit connector
+// Discord Music Bot - Using bot token from environment
 import { Client, GatewayIntentBits, Events, Message, VoiceChannel, EmbedBuilder, Colors, TextChannel } from 'discord.js';
 import { 
   joinVoiceChannel, 
@@ -23,41 +23,13 @@ const connections = new Map<string, VoiceConnection>();
 let discordClient: Client | null = null;
 let botStartTime: number = Date.now();
 
-// Discord connector authentication
-let connectionSettings: any;
-
-async function getAccessToken() {
-  if (connectionSettings && connectionSettings.settings.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    return connectionSettings.settings.access_token;
+// Get bot token from environment
+function getBotToken(): string {
+  const token = process.env.DISCORD_BOT_TOKEN;
+  if (!token) {
+    throw new Error('DISCORD_BOT_TOKEN not found in environment variables');
   }
-  
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
-
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
-  }
-
-  connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=discord',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('Discord not connected');
-  }
-  return accessToken;
+  return token;
 }
 
 // Get or create queue for a guild
@@ -653,7 +625,7 @@ async function handleMessage(message: Message): Promise<void> {
 // Initialize bot
 export async function initDiscordBot(): Promise<void> {
   try {
-    const token = await getAccessToken();
+    const token = getBotToken();
     
     discordClient = new Client({
       intents: [
